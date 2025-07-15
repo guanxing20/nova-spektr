@@ -1,8 +1,7 @@
-import { combine, createEvent, createStore, sample, split } from 'effector';
+import { combine, createEvent, createStore, restore, sample, split } from 'effector';
 import { spread } from 'patronum';
 
 import {
-  type Account,
   type ChainId,
   type MultisigTxWrapper,
   type ProxiedAccount,
@@ -14,14 +13,15 @@ import {
   type TxWrapper,
   WrapperKind,
 } from '@/shared/core';
-import { nonNullable, nullable, toAddress, transferableAmount } from '@/shared/lib/utils';
+import { nonNullable, nullable, toAddress } from '@/shared/lib/utils';
 import { type PathType, Paths } from '@/shared/routes';
-import { balanceModel, balanceUtils } from '@/entities/balance';
+import { type AnyAccount } from '@/domains/network';
 import { networkModel } from '@/entities/network';
 import { proxyModel, proxyUtils } from '@/entities/proxy';
 import { transactionService } from '@/entities/transaction';
 import { accountUtils, walletModel, walletUtils } from '@/entities/wallet';
-import { basketOperations } from '@/aggregates/basket-operations';
+import { type BasketTransactionDraft, basketOperations } from '@/aggregates/basket-operations';
+import { walletSelect } from '@/aggregates/wallet-select';
 import { balanceSubModel } from '@/features/assets-balances';
 import { navigationModel } from '@/features/navigation';
 import { signModel } from '@/features/operations/OperationSign/model/sign-model';
@@ -45,19 +45,18 @@ const flowStarted = createEvent<Input>();
 const flowFinished = createEvent();
 const txSaved = createEvent();
 
-const $step = createStore<Step>(Step.NONE);
+const $step = restore(stepChanged, Step.NONE);
 
 const $removeProxyStore = createStore<RemoveProxyStore | null>(null).reset(flowFinished);
 
 const $wrappedTx = createStore<Transaction | null>(null).reset(flowFinished);
 const $coreTx = createStore<Transaction | null>(null).reset(flowFinished);
-const $multisigTx = createStore<Transaction | null>(null).reset(flowFinished);
 const $redirectAfterSubmitPath = createStore<PathType | null>(null).reset(flowStarted);
 
-const $availableSignatories = createStore<Account[][]>([]);
+const $availableSignatories = createStore<AnyAccount[][]>([]);
 const $isProxy = createStore<boolean>(false);
 const $isMultisig = createStore<boolean>(false);
-const $selectedSignatories = createStore<Account[]>([]);
+const $selectedSignatories = createStore<AnyAccount[]>([]);
 
 const $chain = $removeProxyStore.map((store) => store?.chain ?? null);
 const $account = $removeProxyStore.map((store) => store?.account ?? null);
@@ -121,34 +120,6 @@ const $realAccount = combine(
   },
 );
 
-const $signatories = combine(
-  {
-    chain: $chain,
-    availableSignatories: $availableSignatories,
-    balances: balanceModel.$balances,
-  },
-  ({ chain, availableSignatories, balances }) => {
-    if (!chain) return [];
-
-    return availableSignatories.reduce<{ signer: Account; balance: string }[][]>((acc, signatories) => {
-      const balancedSignatories = signatories.map((signatory) => {
-        const balance = balanceUtils.getBalance(
-          balances,
-          signatory.accountId,
-          chain.chainId,
-          chain.assets[0].assetId.toString(),
-        );
-
-        return { signer: signatory, balance: transferableAmount(balance) };
-      });
-
-      acc.push(balancedSignatories);
-
-      return acc;
-    }, []);
-  },
-);
-
 const $initiatorWallet = combine(
   {
     store: $removeProxyStore,
@@ -164,7 +135,7 @@ const $initiatorWallet = combine(
 sample({
   clock: $txWrappers,
   fn: (txWrappers: TxWrapper[]) => {
-    const signatories = txWrappers.reduce<Account[][]>((acc, wrapper) => {
+    const signatories = txWrappers.reduce<AnyAccount[][]>((acc, wrapper) => {
       if (wrapper.kind === WrapperKind.MULTISIG) acc.push(wrapper.signatories);
 
       return acc;
@@ -199,8 +170,6 @@ const $shouldRemovePureProxy = combine(
     return isPureProxy && anyProxies.length === 1;
   },
 );
-
-sample({ clock: stepChanged, target: $step });
 
 split({
   clock: wentBackFromConfirm,
@@ -250,7 +219,7 @@ sample({
 sample({
   clock: flowStarted,
   source: {
-    activeWallet: walletModel.$activeWallet,
+    activeWallet: walletSelect.$selectedWallet,
     walletDetails: formModel.$wallet,
   },
   filter: ({ activeWallet, walletDetails }) => {
@@ -279,7 +248,7 @@ sample({
   clock: warningModel.output.formSubmitted,
   source: {
     realAccount: $realAccount,
-    signatories: $signatories,
+    signatories: $availableSignatories,
     account: $account,
     chain: $chain,
   },
@@ -347,7 +316,6 @@ sample({
   target: spread({
     wrappedTx: $wrappedTx,
     coreTx: $coreTx,
-    multisigTx: $multisigTx,
   }),
 });
 
@@ -419,7 +387,6 @@ sample({
   source: {
     removeProxyStore: $removeProxyStore,
     wrappedTx: $wrappedTx,
-    multisigTx: $multisigTx,
     coreTx: $coreTx,
     txWrappers: $txWrappers,
   },
@@ -434,7 +401,6 @@ sample({
       signatory: proxyData.removeProxyStore!.signatory,
       wrappedTxs: [proxyData.wrappedTx!],
       coreTxs: [proxyData.coreTx!],
-      multisigTxs: proxyData.multisigTx ? [proxyData.multisigTx] : [],
     },
     step: Step.SUBMIT,
   }),
@@ -490,18 +456,15 @@ sample({
 sample({
   clock: txSaved,
   source: {
-    store: $removeProxyStore,
     coreTx: $coreTx,
-    txWrappers: $txWrappers,
   },
-  filter: ({ store, coreTx, txWrappers }) => {
-    return Boolean(store) && Boolean(coreTx) && Boolean(txWrappers);
-  },
-  fn: ({ store, coreTx, txWrappers }) => {
-    const tx = {
-      initiatorAccountId: store!.account.accountId,
-      coreTx: coreTx!,
-      txWrappers,
+  fn: ({ coreTx }) => {
+    if (nullable(coreTx)) return [];
+
+    const tx: BasketTransactionDraft = {
+      initiatorAccountId: coreTx.accountId,
+      coreTx,
+      route: [],
       createdAt: Date.now(),
     };
 

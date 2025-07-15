@@ -4,14 +4,14 @@ import { kernelModel } from '@/shared/core';
 import { createFeature, registerFeatures } from '@/shared/feature';
 import { isWeb } from '@/shared/lib/utils';
 import { config as collectivesConfig, trackService } from '@/domains/collectives';
-import { accounts } from '@/domains/network';
-import { multisigsModel } from '@/entities/multisig';
+import { accounts, multisigOperation } from '@/domains/network';
+import { multisigsModel } from '@/entities/multisig-accounts';
 import { networkModel } from '@/entities/network';
 import { notificationModel } from '@/entities/notification';
 import { proxyModel } from '@/entities/proxy';
 import { walletModel } from '@/entities/wallet';
 import { governanceMetaProvider } from '@/aggregates/governance-meta-provider';
-import { assetsSettingsModel } from '@/features/assets';
+import { assetsSettingsModel, portfolioModel } from '@/features/assets';
 import { assetsNavigationFeature } from '@/features/assets-navigation';
 import { basketNavigationFeature } from '@/features/basket-navigation';
 import { contactsNavigationFeature } from '@/features/contacts-navigation';
@@ -48,8 +48,9 @@ const populate = async () => {
   await walletModel.populate();
   multisigsModel.subscribe();
   await proxyModel.populate();
-
+  multisigOperation.populate();
   governanceMetaProvider.populate();
+  portfolioModel.populate();
 
   // TODO rework as populate effects
   kernelModel.events.appStarted();
@@ -80,7 +81,7 @@ export const bootstrap = () => {
     import('@/features/wallet-pairing').then(({ walletPairingFeature }) => walletPairingFeature),
 
     import('@/features/multisig-wallet').then(({ multisigWalletFeature }) => multisigWalletFeature),
-    import('@/features/multisig-wallet-pairing').then(({ multisigWalletPairingFeature }) => multisigWalletPairingFeature),
+    import('@/features/multisig-wallet-create').then(({ multisigWalletPairingFeature }) => multisigWalletPairingFeature),
 
     import('@/features/polkadot-vault-wallet').then(({ polkadotVaultWalletFeature }) => polkadotVaultWalletFeature),
     import('@/features/polkadot-vault-wallet-pairing').then(({ polkadotVaultWalletPairingFeature }) => polkadotVaultWalletPairingFeature),
@@ -96,6 +97,10 @@ export const bootstrap = () => {
     import('@/features/ledger-wallet-pairing').then(({ ledgerWalletPairingFeature }) => ledgerWalletPairingFeature),
 
     import('@/features/proxied-wallet').then(({ proxiedWalletFeature }) => proxiedWalletFeature),
+
+    import('@/features/accounts-structure').then(({ accountsStructureFeature }) => accountsStructureFeature),
+
+    import('@/features/multisig-operations').then(({ multisigOperationsFeature }) => multisigOperationsFeature),
 
     import('@/features/fellowship-activity-feed').then(({ fellowshipActivityFeedFeature }) => fellowshipActivityFeedFeature),
     import('@/features/fellowship-basket').then(({ fellowshipBasketFeature }) => fellowshipBasketFeature),
@@ -113,8 +118,6 @@ export const bootstrap = () => {
 
     import('@/features/governance-operation-details').then(({ governanceOperationDetailFeature }) => governanceOperationDetailFeature),
     import('@/features/governance-basket').then(({ governanceBasketFeature }) => governanceBasketFeature),
-
-    import('@/features/multisig-operation-details').then(({ multisigOperationDetailsFeature }) => multisigOperationDetailsFeature),
 
     import('@/features/transfer-operation-details').then(({ transferOperationDetailFeature }) => transferOperationDetailFeature),
     import('@/features/transfer-basket').then(({ transferBasketFeature }) => transferBasketFeature),

@@ -14,15 +14,14 @@ import {
   type TxWrapper,
   WrapperKind,
 } from '@/shared/core';
-import { nonNullable, nullable, toAccountId, toAddress, transferableAmount } from '@/shared/lib/utils';
+import { nonNullable, nullable, toAccountId, toAddress } from '@/shared/lib/utils';
 import { type PathType, Paths } from '@/shared/routes';
 import { type AnyAccount } from '@/domains/network';
-import { balanceModel, balanceUtils } from '@/entities/balance';
 import { networkModel } from '@/entities/network';
 import { proxyModel, proxyUtils } from '@/entities/proxy';
 import { transactionService } from '@/entities/transaction';
 import { accountUtils, walletModel, walletUtils } from '@/entities/wallet';
-import { basketOperations } from '@/aggregates/basket-operations';
+import { type BasketTransactionDraft, basketOperations } from '@/aggregates/basket-operations';
 import { balanceSubModel } from '@/features/assets-balances';
 import { navigationModel } from '@/features/navigation';
 import { signModel } from '@/features/operations/OperationSign/model/sign-model';
@@ -46,14 +45,13 @@ const flowStarted = createEvent<Input>();
 const flowFinished = createEvent();
 const txSaved = createEvent();
 
-const $step = createStore<Step>(Step.NONE);
+const $step = restore(stepChanged, Step.NONE);
 
 const $removeProxyStore = createStore<RemoveProxyStore | null>(null);
 const $wrappedTx = createStore<Transaction | null>(null).reset(flowFinished);
 const $coreTx = createStore<Transaction | null>(null).reset(flowFinished);
-const $multisigTx = createStore<Transaction | null>(null).reset(flowFinished);
 
-const $availableSignatories = createStore<AnyAccount[][]>([]);
+const $signatories = createStore<AnyAccount[][]>([]);
 const $isProxy = createStore<boolean>(false);
 const $isMultisig = createStore<boolean>(false);
 const $selectedSignatories = createStore<AnyAccount[]>([]);
@@ -143,34 +141,6 @@ const $realAccount = combine(
   { skipVoid: false },
 );
 
-const $signatories = combine(
-  {
-    chain: $chain,
-    availableSignatories: $availableSignatories,
-    balances: balanceModel.$balances,
-  },
-  ({ chain, availableSignatories, balances }) => {
-    if (!chain) return [];
-
-    return availableSignatories.reduce<{ signer: AnyAccount; balance: string }[][]>((acc, signatories) => {
-      const balancedSignatories = signatories.map((signatory) => {
-        const balance = balanceUtils.getBalance(
-          balances,
-          signatory.accountId,
-          chain.chainId,
-          chain.assets[0].assetId.toString(),
-        );
-
-        return { signer: signatory, balance: transferableAmount(balance) };
-      });
-
-      acc.push(balancedSignatories);
-
-      return acc;
-    }, []);
-  },
-);
-
 const $initiatorWallet = combine(
   {
     store: $removeProxyStore,
@@ -200,13 +170,11 @@ sample({
     };
   },
   target: spread({
-    signatories: $availableSignatories,
+    signatories: $signatories,
     isProxy: $isProxy,
     isMultisig: $isMultisig,
   }),
 });
-
-sample({ clock: stepChanged, target: $step });
 
 split({
   clock: wentBackFromConfirm,
@@ -320,7 +288,6 @@ sample({
   target: spread({
     wrappedTx: $wrappedTx,
     coreTx: $coreTx,
-    multisigTx: $multisigTx,
   }),
 });
 
@@ -391,11 +358,10 @@ sample({
     removeProxyStore: $removeProxyStore,
     wrappedTx: $wrappedTx,
     coreTx: $coreTx,
-    multisigTx: $multisigTx,
     txWrappers: $txWrappers,
   },
   filter: (proxyData) => {
-    const isMultisigRequired = !transactionService.hasMultisig(proxyData.txWrappers) || Boolean(proxyData.multisigTx);
+    const isMultisigRequired = !transactionService.hasMultisig(proxyData.txWrappers);
 
     return Boolean(proxyData.removeProxyStore) && Boolean(proxyData.wrappedTx) && isMultisigRequired;
   },
@@ -407,7 +373,6 @@ sample({
       signatory: proxyData.removeProxyStore!.signatory,
       wrappedTxs: [proxyData.wrappedTx!],
       coreTxs: [proxyData.coreTx!],
-      multisigTxs: proxyData.multisigTx ? [proxyData.multisigTx] : [],
     },
     step: Step.SUBMIT,
   }),
@@ -441,18 +406,15 @@ sample({
 sample({
   clock: txSaved,
   source: {
-    store: $removeProxyStore,
     coreTx: $coreTx,
-    txWrappers: $txWrappers,
   },
-  filter: ({ store, coreTx, txWrappers }) => {
-    return Boolean(store) && Boolean(coreTx) && Boolean(txWrappers);
-  },
-  fn: ({ store, coreTx, txWrappers }) => {
-    const tx = {
-      initiatorAccountId: store!.account.accountId,
-      coreTx: coreTx!,
-      txWrappers,
+  fn: ({ coreTx }) => {
+    if (nullable(coreTx)) return [];
+
+    const tx: BasketTransactionDraft = {
+      initiatorAccountId: coreTx.accountId,
+      coreTx,
+      route: [],
       createdAt: Date.now(),
     };
 

@@ -6,7 +6,7 @@ import { Button, DetailRow, FootnoteText, Icon } from '@/shared/ui';
 import { Account, TransactionDetails } from '@/shared/ui-entities';
 import { SignButton } from '@/entities/operations';
 import { proxyUtils } from '@/entities/proxy';
-import { FeeWithLabel, MultisigDepositWithLabel } from '@/entities/transaction';
+import { FeeWithLabelWithDataLoading, MultisigDepositWithLabel } from '@/entities/transaction';
 import { accountUtils, walletModel } from '@/entities/wallet';
 import { MultisigExistsAlert } from '../../common/MultisigExistsAlert';
 import { confirmModel } from '../model/confirm-model';
@@ -69,9 +69,8 @@ export const Confirmation = ({ id = 0, secondaryActionButton, hideSignButton, on
       <TransactionDetails
         chain={confirmStore.chain}
         wallets={wallets}
-        initiator={[confirmStore.account]}
+        initiators={[confirmStore.account]}
         signatory={confirmStore.signatory}
-        proxied={confirmStore.proxiedAccount}
       >
         <DetailRow label={t('proxy.details.accessType')} className="pr-2">
           {/* eslint-disable-next-line i18next/no-literal-string */}
@@ -92,7 +91,7 @@ export const Confirmation = ({ id = 0, secondaryActionButton, hideSignButton, on
           />
         )}
 
-        <FeeWithLabel
+        <FeeWithLabelWithDataLoading
           api={api}
           asset={confirmStore.chain!.assets[0]}
           transaction={confirmStore.transaction}

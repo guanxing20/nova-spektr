@@ -1,11 +1,11 @@
-import { combine, createEvent, createStore, sample } from 'effector';
+import { combine, createEvent, createStore, restore, sample } from 'effector';
 import { spread } from 'patronum';
 
 import { type Transaction } from '@/shared/core';
-import { nonNullable } from '@/shared/lib/utils';
+import { nonNullable, nullable } from '@/shared/lib/utils';
 import { type PathType, Paths } from '@/shared/routes';
 import { walletModel, walletUtils } from '@/entities/wallet';
-import { basketOperations } from '@/aggregates/basket-operations';
+import { type BasketTransactionDraft, basketOperations } from '@/aggregates/basket-operations';
 import { balanceSubModel } from '@/features/assets-balances';
 import { navigationModel } from '@/features/navigation';
 import { signModel } from '@/features/operations/OperationSign/model/sign-model';
@@ -23,12 +23,11 @@ const flowFinished = createEvent();
 const flowClosed = createEvent();
 const txSaved = createEvent();
 
-const $step = createStore<Step>(Step.NONE);
+const $step = restore(stepChanged, Step.NONE);
 
 const $addProxyStore = createStore<AddProxyStore | null>(null).reset(flowFinished);
 const $wrappedTx = createStore<Transaction | null>(null).reset(flowFinished);
 const $coreTx = createStore<Transaction | null>(null).reset(flowFinished);
-const $multisigTx = createStore<Transaction | null>(null).reset(flowFinished);
 const $redirectAfterSubmitPath = createStore<PathType | null>(null).reset(flowStarted);
 
 const $initiatorWallet = combine(
@@ -43,8 +42,6 @@ const $initiatorWallet = combine(
   },
   { skipVoid: false },
 );
-
-sample({ clock: stepChanged, target: $step });
 
 sample({
   clock: flowStarted,
@@ -76,13 +73,11 @@ sample({
   clock: formModel.output.formSubmitted,
   fn: ({ transactions, formData }) => ({
     wrappedTx: transactions.wrappedTx,
-    multisigTx: transactions.multisigTx || null,
     coreTx: transactions.coreTx,
     store: formData,
   }),
   target: spread({
     wrappedTx: $wrappedTx,
-    multisigTx: $multisigTx,
     coreTx: $coreTx,
     store: $addProxyStore,
   }),
@@ -132,7 +127,6 @@ sample({
     addProxyStore: $addProxyStore,
     coreTx: $coreTx,
     wrappedTx: $wrappedTx,
-    multisigTx: $multisigTx,
   },
   filter: (proxyData) => {
     return Boolean(proxyData.addProxyStore) && Boolean(proxyData.wrappedTx) && Boolean(proxyData.coreTx);
@@ -145,7 +139,6 @@ sample({
       signatory: proxyData.addProxyStore!.signatory,
       coreTxs: [proxyData.coreTx!],
       wrappedTxs: [proxyData.wrappedTx!],
-      multisigTxs: proxyData.multisigTx ? [proxyData.multisigTx] : [],
     },
     step: Step.SUBMIT,
   }),
@@ -200,18 +193,15 @@ sample({
 sample({
   clock: txSaved,
   source: {
-    store: $addProxyStore,
     coreTx: $coreTx,
-    txWrappers: formModel.$txWrappers,
   },
-  filter: ({ store, coreTx, txWrappers }) => {
-    return Boolean(store) && Boolean(coreTx) && Boolean(txWrappers);
-  },
-  fn: ({ store, coreTx, txWrappers }) => {
-    const tx = {
-      initiatorAccountId: store!.account.accountId,
-      coreTx: coreTx!,
-      txWrappers,
+  fn: ({ coreTx }) => {
+    if (nullable(coreTx)) return [];
+
+    const tx: BasketTransactionDraft = {
+      initiatorAccountId: coreTx.accountId,
+      coreTx,
+      route: [],
       createdAt: Date.now(),
     };
 

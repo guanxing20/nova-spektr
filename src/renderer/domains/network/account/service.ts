@@ -1,10 +1,14 @@
-import { type Chain, CryptoType } from '@/shared/core';
-import { createAnyOf, createPipeline } from '@/shared/di';
+import { type ApiPromise } from '@polkadot/api';
+
+import { type Asset, type Balance, type Chain, type ChainId, CryptoType } from '@/shared/core';
+import { createAnyOf, createPipeline, createTransformer } from '@/shared/di';
 import { nullable } from '@/shared/lib/utils';
 import { networkUtils } from '@/entities/network';
+import { type Section } from '../transaction/types';
 
 import {
   type AccountNode,
+  type AccountValidationError,
   type AnyAccount,
   type AnyAccountDraft,
   type ChainAccount,
@@ -15,6 +19,25 @@ const accountAvailabilityOnChainAnyOf = createAnyOf<{ account: UniversalAccount;
 const accountActionPermissionAnyOf = createAnyOf<{ account: AnyAccount }>();
 const accountCanSignMultipleAnyOf = createAnyOf<{ account: AnyAccount }>();
 const accountCollectChildrenPipeline = createPipeline<AnyAccount[], { account: AnyAccount; accounts: AnyAccount[] }>();
+const validateRouteBalancesTransformer = createTransformer<
+  {
+    route: AnyAccount[];
+    account: AnyAccount;
+    index: number;
+    balances: Balance[];
+    chainId: ChainId;
+    asset: Asset;
+    api: ApiPromise;
+  },
+  Promise<AccountValidationError | null> | AccountValidationError
+>();
+const validateCallPermissionTransformer = createTransformer<
+  {
+    route: AnyAccount[];
+    call: Section;
+  },
+  AccountValidationError
+>();
 
 /**
  * ATTENTION! This method is the source of stable id for different types of
@@ -73,7 +96,7 @@ function isAccountAvailableOnChain(account: Pick<AnyAccount, 'type' | 'cryptoTyp
   return false;
 }
 
-function filterAccountOnChain(accounts: AnyAccount[], chain: Chain) {
+function filterAccountsOnChain(accounts: AnyAccount[], chain: Chain) {
   return accounts.filter(account => isAccountAvailableOnChain(account, chain));
 }
 
@@ -148,10 +171,7 @@ function traverseGraph(
   visitNode(node);
 }
 
-/**
- * Find leaf accounts, that can sign transactions.
- */
-function findSignatories(account: AnyAccount, accounts: AnyAccount[], chain: Chain): AnyAccount[] {
+function findLeafs(account: AnyAccount, accounts: AnyAccount[], chain: Chain): AnyAccount[] {
   const graphs = createAccountGraphs(accounts, chain);
   const node = graphs.get(account);
   if (nullable(node)) {
@@ -162,13 +182,20 @@ function findSignatories(account: AnyAccount, accounts: AnyAccount[], chain: Cha
 
   traverseGraph(node, {
     enter(node) {
-      if (node.children.length === 0 && hasPermissionToMakeActions(node.account)) {
+      if (node.children.length === 0) {
         result.push(node.account);
       }
     },
   });
 
   return result;
+}
+
+/**
+ * Find leaf accounts, that can sign transactions.
+ */
+function findSignatories(account: AnyAccount, accounts: AnyAccount[], chain: Chain): AnyAccount[] {
+  return findLeafs(account, accounts, chain).filter(hasPermissionToMakeActions);
 }
 
 /**
@@ -200,7 +227,6 @@ function findRoute(source: AnyAccount, destination: AnyAccount, accounts: AnyAcc
     return [destination];
   }
 
-  const stack: AnyAccount[] = [];
   const graphs = createAccountGraphs(accounts, chain);
   const entryNode = graphs.get(source);
 
@@ -208,19 +234,63 @@ function findRoute(source: AnyAccount, destination: AnyAccount, accounts: AnyAcc
     return [];
   }
 
-  traverseGraph(entryNode, {
-    enter(node) {
-      stack.push(node.account);
-      if (node.account === destination) {
-        return false;
-      }
-    },
-    exit() {
-      stack.pop();
-    },
-  });
+  const queue = [{ node: entryNode, path: [entryNode.account] }];
+  const visited = {
+    [entryNode.account.id]: true, // because includes in array works for 0(N)
+  };
+  let i = 0; // because unshift works for 0(N)
 
-  return stack;
+  while (queue.length > 0) {
+    const item = queue[i];
+
+    if (!item) {
+      return [];
+    }
+
+    const { node, path } = item;
+
+    for (const child of node.children) {
+      if (visited[child.account.id]) continue;
+
+      const newPath = [...path, child.account];
+
+      if (child.account === destination) {
+        return newPath;
+      }
+
+      visited[child.account.id] = true;
+      queue.push({ node: child, path: newPath });
+    }
+
+    i++;
+  }
+
+  return [];
+}
+
+type BalanceValidationParams = {
+  route: AnyAccount[];
+  balances: Balance[];
+  chainId: ChainId;
+  asset: Asset;
+  api: ApiPromise;
+};
+
+async function validateRouteBalances({ api, route, balances, chainId, asset }: BalanceValidationParams) {
+  const errors: AccountValidationError[] = [];
+
+  for (const [index, account] of route.entries()) {
+    const error = await validateRouteBalancesTransformer({ route, account, index, balances, chainId, asset, api });
+    if (error) {
+      errors.push(error);
+    }
+  }
+
+  return errors;
+}
+
+function validateCallPermission(route: AnyAccount[], call: Section) {
+  return validateCallPermissionTransformer({ route, call });
 }
 
 export const accountService = {
@@ -228,6 +298,8 @@ export const accountService = {
   accountActionPermissionAnyOf,
   accountCanSignMultipleAnyOf,
   accountCollectChildrenPipeline,
+  validateRouteBalancesTransformer,
+  validateCallPermissionTransformer,
 
   uniqId,
 
@@ -239,14 +311,20 @@ export const accountService = {
 
   hasPermissionToMakeActions,
 
-  filterAccountOnChain,
+  filterAccountsOnChain,
   filterAccountsByWallet,
 
   // graph
 
   createAccountGraphs,
+  findLeafs,
   findSignatories,
   findInitiators,
   findRoute,
   traverseGraph,
+
+  // validations
+
+  validateRouteBalances,
+  validateCallPermission,
 };

@@ -1,11 +1,10 @@
 /* eslint-disable import-x/max-dependencies */
 import { type ApiPromise } from '@polkadot/api';
 import { type UnsubscribePromise } from '@polkadot/api/types';
-import { combine, createEffect, createEvent, createStore, sample } from 'effector';
+import { combine, createEffect, createEvent, createStore, restore, sample } from 'effector';
 import { combineEvents, delay, spread } from 'patronum';
 
 import {
-  type Account,
   type NoID,
   type PartialProxiedAccount,
   type ProxyGroup,
@@ -14,15 +13,17 @@ import {
   type Transaction,
   WalletType,
 } from '@/shared/core';
-import { nonNullable, toAddress } from '@/shared/lib/utils';
+import { nonNullable, nullable, toAddress } from '@/shared/lib/utils';
 import { type AccountId, pjsSchema } from '@/shared/polkadotjs-schemas';
 import { type PathType, Paths } from '@/shared/routes';
+import { type AnyAccount } from '@/domains/network';
 import { subscriptionService } from '@/entities/chain';
 import { networkModel } from '@/entities/network';
 import { proxyModel, proxyUtils } from '@/entities/proxy';
 import { type ExtrinsicResultParams, transactionService } from '@/entities/transaction';
 import { accountUtils, walletModel, walletUtils } from '@/entities/wallet';
-import { basketOperations } from '@/aggregates/basket-operations';
+import { type BasketTransactionDraft, basketOperations } from '@/aggregates/basket-operations';
+import { walletSelect } from '@/aggregates/wallet-select';
 import { balanceSubModel } from '@/features/assets-balances';
 import { navigationModel } from '@/features/navigation';
 import { signModel } from '@/features/operations/OperationSign/model/sign-model';
@@ -40,22 +41,21 @@ const flowStarted = createEvent();
 const flowFinished = createEvent();
 const txSaved = createEvent();
 
-const $step = createStore<Step>(Step.NONE);
+const $step = restore(stepChanged, Step.NONE);
 
 const $addProxyStore = createStore<AddPureProxiedStore | null>(null).reset(flowFinished);
 
 const $wrappedTx = createStore<Transaction | null>(null).reset(flowFinished);
-const $multisigTx = createStore<Transaction | null>(null).reset(flowFinished);
 const $coreTx = createStore<Transaction | null>(null).reset(flowFinished);
-const $selectedSignatories = createStore<Account[]>([]);
+const $signatories = createStore<AnyAccount[]>([]);
 const $redirectAfterSubmitPath = createStore<PathType | null>(null).reset(flowStarted);
 
 const $txWrappers = combine(
   {
-    wallet: walletModel.$activeWallet,
+    wallet: walletSelect.$selectedWallet,
     wallets: walletModel.$wallets,
     store: $addProxyStore,
-    signatories: $selectedSignatories,
+    signatories: $signatories,
   },
   ({ wallet, store, wallets, signatories }) => {
     if (!wallet || !store?.chain || !store.account) return [];
@@ -124,8 +124,6 @@ const getPureProxyFx = createEffect(
   },
 );
 
-sample({ clock: stepChanged, target: $step });
-
 sample({
   clock: flowStarted,
   fn: () => Step.INIT,
@@ -156,20 +154,18 @@ sample({
   clock: formModel.output.formSubmitted,
   filter: ({ formData }) => Boolean(formData.signatory),
   fn: ({ formData }) => [formData.signatory!],
-  target: $selectedSignatories,
+  target: $signatories,
 });
 
 sample({
   clock: formModel.output.formSubmitted,
   fn: ({ transactions, formData }) => ({
     wrappedTx: transactions.wrappedTx,
-    multisigTx: transactions.multisigTx || null,
     coreTx: transactions.coreTx,
     store: formData,
   }),
   target: spread({
     wrappedTx: $wrappedTx,
-    multisigTx: $multisigTx,
     coreTx: $coreTx,
     store: $addProxyStore,
   }),
@@ -221,7 +217,6 @@ sample({
     addProxyStore: $addProxyStore,
     wrappedTx: $wrappedTx,
     coreTx: $coreTx,
-    multisigTx: $multisigTx,
     txWrappers: $txWrappers,
   },
   filter: (proxyData) => {
@@ -235,7 +230,6 @@ sample({
       signatory: proxyData.addProxyStore!.signatory,
       wrappedTxs: [proxyData.wrappedTx!],
       coreTxs: [proxyData.coreTx!],
-      multisigTxs: proxyData.multisigTx ? [proxyData.multisigTx] : [],
     },
     step: Step.SUBMIT,
   }),
@@ -349,18 +343,15 @@ sample({
 sample({
   clock: txSaved,
   source: {
-    store: $addProxyStore,
     coreTx: $coreTx,
-    txWrappers: formModel.$txWrappers,
   },
-  filter: ({ store, coreTx, txWrappers }) => {
-    return Boolean(store) && Boolean(coreTx) && Boolean(txWrappers);
-  },
-  fn: ({ store, coreTx, txWrappers }) => {
-    const tx = {
-      initiatorAccountId: store!.account.accountId,
-      coreTx: coreTx!,
-      txWrappers,
+  fn: ({ coreTx }) => {
+    if (nullable(coreTx)) return [];
+
+    const tx: BasketTransactionDraft = {
+      initiatorAccountId: coreTx.accountId,
+      coreTx,
+      route: [],
       createdAt: Date.now(),
     };
 
@@ -383,7 +374,7 @@ sample({
 sample({
   clock: flowFinished,
   source: {
-    activeWallet: walletModel.$activeWallet,
+    activeWallet: walletSelect.$selectedWallet,
     walletDetails: formModel.$wallet,
   },
   filter: ({ activeWallet, walletDetails }) => {

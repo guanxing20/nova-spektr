@@ -2,8 +2,8 @@ import { useGate, useUnit } from 'effector-react';
 import { type ReactNode, useMemo, useState } from 'react';
 import { Trans } from 'react-i18next';
 
-import { $features } from '@/shared/config/features';
 import { type FlexibleMultisigWallet, type MultisigWallet } from '@/shared/core';
+import { Slot, createSlot } from '@/shared/di';
 import { useI18n } from '@/shared/i18n';
 import { useToggle } from '@/shared/lib/hooks';
 import { assert, toAddress } from '@/shared/lib/utils';
@@ -12,9 +12,9 @@ import { type IconNames } from '@/shared/ui/types';
 import { Address, ChainAccountsList, RootExplorers } from '@/shared/ui-entities';
 import { Box, Dropdown, Modal, ScrollArea, Tabs } from '@/shared/ui-kit';
 import { accountService, accounts } from '@/domains/network';
+import { type AnyAccount } from '@/domains/network';
 import { networkModel, networkUtils } from '@/entities/network';
 import { ContactItem, WalletCardLg, WalletCardMd, accountUtils, permissionUtils } from '@/entities/wallet';
-import { convertToFlexibleFeature } from '@/features/multisig-convert-to-flexible';
 import { proxyAddFeature } from '@/features/proxy-add';
 import { proxyAddPureFeature } from '@/features/proxy-add-pure';
 import { ForgetWalletModal } from '@/features/wallets/ForgetWallet';
@@ -22,6 +22,8 @@ import { RenameWalletModal } from '@/features/wallets/RenameWallet';
 import { multisigWalletDetailsModel } from '../../model/multisig-wallet-details';
 import { NoProxiesAction } from '../components/NoProxiesAction';
 import { ProxiesList } from '../components/ProxiesList';
+
+export const overviewSlot = createSlot<{ walletAccounts: AnyAccount[] }>();
 
 const {
   models: { addProxy },
@@ -32,11 +34,6 @@ const {
   models: { addPureProxied },
   views: { AddPureProxied },
 } = proxyAddPureFeature;
-
-const {
-  models: { convertToFlexibleModel },
-  views: { ConvertRegularToFlexible },
-} = convertToFlexibleFeature;
 
 type Props = {
   wallet: MultisigWallet | FlexibleMultisigWallet;
@@ -103,21 +100,12 @@ export const MultisigWalletDetails = ({ wallet, onClose }: Props) => {
     });
   }
 
-  // TODO: remove it when flexible multisig is supported
-  const features = useUnit($features);
-
   if (canCreatePureProxy) {
-    features.flexibleMultisig
-      ? options.push({
-          icon: 'addCircle' as IconNames,
-          title: t('walletDetails.common.convertToFlexibleAction'),
-          onClick: () => convertToFlexibleModel.flow.open({ wallet }),
-        })
-      : options.push({
-          icon: 'addCircle' as IconNames,
-          title: t('walletDetails.common.addPureProxiedAction'),
-          onClick: addPureProxied.events.flowStarted,
-        });
+    options.push({
+      icon: 'addCircle' as IconNames,
+      title: t('walletDetails.common.addPureProxiedAction'),
+      onClick: addPureProxied.events.flowStarted,
+    });
   }
 
   const ActionButton = (
@@ -251,7 +239,15 @@ export const MultisigWalletDetails = ({ wallet, onClose }: Props) => {
         </Modal.Title>
         <Modal.HeaderContent>
           <div className="mb-4 flex flex-col gap-y-2.5 border-b border-divider px-5 pb-6 pt-4">
-            <WalletCardLg wallet={wallet} />
+            <div className="flex items-center justify-between">
+              <WalletCardLg wallet={wallet} />
+
+              {multisigAccount && (
+                <div className="shrink-0">
+                  <Slot id={overviewSlot} props={{ walletAccounts: [multisigAccount] }} />
+                </div>
+              )}
+            </div>
             <div className="flex items-center">
               <Icon name="arrowCurveLeftRight" size={16} className="mr-1" />
               <div className="flex items-center text-footnote">
@@ -300,7 +296,6 @@ export const MultisigWalletDetails = ({ wallet, onClose }: Props) => {
 
       <AddProxy wallet={wallet} />
       <AddPureProxied wallet={wallet} />
-      <ConvertRegularToFlexible />
     </>
   );
 };

@@ -1,4 +1,5 @@
-import { combine, createEvent, createStore, restore, sample } from 'effector';
+import { combine, createEffect, createEvent, createStore, restore, sample } from 'effector';
+import { persist } from 'effector-storage/local';
 import { once } from 'patronum';
 
 import { type AssetByChains } from '@/shared/core';
@@ -26,9 +27,20 @@ const $accounts = walletSelect.$selectedAccounts;
 const $activeView = restore<AssetsListView | null>(activeViewChanged, null);
 const $query = restore<string>(queryChanged, '');
 
-const $defaultTokens = createStore(tokensService.getTokensData());
+const $defaultTokens = createStore<AssetByChains[] | null>(null);
 
 const $filteredAccounts = createStore<AnyAccount[] | null>(null);
+
+const populateFx = createEffect((): Promise<AssetByChains[]> => {
+  return tokensService.getTokensData();
+});
+
+persist({
+  key: 'assets_with_chains',
+  source: populateFx.doneData,
+  target: $defaultTokens,
+  sync: true,
+});
 
 sample({
   clock: shardsModel.events.shardsConfirmed,
@@ -55,7 +67,7 @@ const $tokens = combine(
   },
   ({ defaultTokens, activeView, wallet, chains, accounts }) => {
     if (activeView !== AssetsListView.TOKEN_CENTRIC) return DEFAULT_LIST;
-    if (nullable(wallet)) return DEFAULT_LIST;
+    if (nullable(wallet) || nullable(defaultTokens)) return DEFAULT_LIST;
 
     const tokens: AssetByChains[] = [];
 
@@ -63,7 +75,7 @@ const $tokens = combine(
       const filteredChains = token.chains.filter((tokenChain) => {
         const chain = chains[tokenChain.chainId];
         if (!chain) return false;
-        return accountService.filterAccountOnChain(accounts, chain).length > 0;
+        return accountService.filterAccountsOnChain(accounts, chain).length > 0;
       });
 
       if (filteredChains.length === 0) continue;
@@ -98,7 +110,7 @@ const $activeTokens = combine(
         if (nullable(chain)) return false;
         if (networkUtils.isDisabledConnection(connection)) return false;
 
-        return accountService.filterAccountOnChain(filteredAccounts, chain).length > 0;
+        return accountService.filterAccountsOnChain(filteredAccounts, chain).length > 0;
       });
 
       if (filteredChains.length === 0) continue;
@@ -201,6 +213,9 @@ export const portfolioModel = {
   $accounts,
   $sortedTokens,
   $tokensPopulated,
+
+  populate: populateFx,
+
   events: {
     activeViewChanged,
     hideZeroBalancesChanged,

@@ -1,13 +1,21 @@
 import { useUnit } from 'effector-react';
 
+import { balanceService } from '@/shared/api/balances';
 import { $features } from '@/shared/config/features';
-import { type Transaction, TransactionType, WalletIconType, WalletType } from '@/shared/core';
+import {
+  AccountType,
+  type MultisigSignatoryAccount,
+  type Transaction,
+  TransactionType,
+  WalletIconType,
+  WalletType,
+} from '@/shared/core';
 import { createFeature } from '@/shared/feature';
 import { useI18n } from '@/shared/i18n';
-import { isEthereumAccountId } from '@/shared/lib/utils';
+import { assert, isEthereumAccountId, nullable, withdrawableAmountBN } from '@/shared/lib/utils';
 import { type IconTheme, WalletAccountIcon } from '@/shared/ui-entities';
-import { transactionService } from '@/domains/network';
-import { multisigUtils } from '@/entities/multisig';
+import { multisigOperationService, transactionService } from '@/domains/network';
+import { balanceUtils } from '@/entities/balance';
 import { networkUtils } from '@/entities/network';
 import { getExtrinsic } from '@/entities/transaction';
 import { accountUtils, walletUtils } from '@/entities/wallet';
@@ -17,7 +25,7 @@ import { walletGroupSlot, walletIconSlot } from '@/features/wallet-select';
 
 import { WalletGroup, walletActionsSlot } from './components/WalletGroup';
 import { walletsModel } from './model/wallets';
-import { multisigService } from './services/multisigTransaction';
+import { multisigService } from './services/multisig';
 import { type MultisigTransaction } from './types';
 
 export { walletActionsSlot };
@@ -32,7 +40,10 @@ accountSDK(multisigWalletFeature, {
     return accountUtils.isMultisigAccount(account);
   },
   availableOnChain({ account, chain }) {
-    return accountUtils.isMultisigAccount(account) && networkUtils.isMultisigSupported(chain.options);
+    return (
+      (accountUtils.isMultisigAccount(account) || accountUtils.isMultisigSignatoryAccount(account)) &&
+      networkUtils.isMultisigSupported(chain.options)
+    );
   },
   canSignMultipleTransactions() {
     return false;
@@ -40,16 +51,80 @@ accountSDK(multisigWalletFeature, {
   collectAccountChildren(children, { account, accounts }) {
     if (accountUtils.isMultisigAccount(account)) {
       return account.signatories
-        .flatMap(signatory =>
-          accounts.filter(a =>
-            accountUtils.isProxiedAccount(a)
-              ? a.proxyAccountId === signatory.accountId
-              : a.accountId === signatory.accountId,
-          ),
-        )
+        .map((signatory, index) => {
+          const userAccount = accounts.find(a => a.accountId === signatory.accountId);
+
+          if (userAccount) {
+            return userAccount;
+          } else {
+            const accountId = signatory.accountId as string;
+            const signatoryAccount: MultisigSignatoryAccount = {
+              accountType: AccountType.MULTISIG_SIGNATORY,
+              accountId: signatory.accountId,
+              id: signatory.id ? `${signatory.id}` : `${index} ${accountId}`,
+              name: signatory.name ?? '',
+              walletId: account.walletId,
+              cryptoType: account.cryptoType,
+              type: 'universal',
+              signingType: account.signingType,
+            };
+
+            return signatoryAccount;
+          }
+        })
         .concat(children);
     }
     return children;
+  },
+  visualGraphNode({ account, t }) {
+    if (accountUtils.isMultisigAccount(account)) {
+      return {
+        title: 'Multisig',
+        subTitle: t('accountsStructure.multisigThreshold', {
+          threshold: account.threshold,
+          total: account.signatories.length,
+        }),
+        color: '#05B199',
+        background: 'linear-gradient(180deg, #00AF9A 55.03%, #1AB775 100.43%)',
+      };
+    }
+
+    if (accountUtils.isMultisigSignatoryAccount(account)) {
+      return {
+        title: 'Signatory',
+        color: '#C3C3CB',
+        disabled: true,
+      };
+    }
+  },
+  connection({ target }) {
+    if (accountUtils.isMultisigAccount(target)) {
+      return {
+        color: '#05B199',
+      };
+    }
+  },
+  validateRouteBalances({ account, api, route, balances, chainId, asset, index }) {
+    if (accountUtils.isMultisigAccount(account)) {
+      const deposit = multisigService.getMultisigDeposit(account.threshold, api);
+      const payer = route.at(index + 1);
+
+      if (nullable(payer)) {
+        return { account, message: 'Multisig signatory payer not found' };
+      }
+      const balance = balanceUtils.getBalance(balances, payer.accountId, chainId, asset.assetId.toString());
+      if (nullable(balance)) {
+        return { account, message: 'Balance not found' };
+      }
+
+      return balanceService.getExistentialDeposit(api, asset).then(existentialDeposit => {
+        const spend = existentialDeposit.add(deposit);
+        if (withdrawableAmountBN(balance).lt(spend)) {
+          return { account, message: 'Insufficient funds for multisig deposit' };
+        }
+        return null;
+      });
+    }
   },
 });
 
@@ -81,9 +156,12 @@ transactionSDK(multisigWalletFeature, {
       return transaction;
     }
   },
-  wrap(transaction, { api, account }) {
+  wrap(transaction, { api, account, route, index }) {
     if (accountUtils.isMultisigAccount(account)) {
-      const otherSignatories = multisigUtils.getOtherSignatories(account, account.accountId);
+      const signatory = route.at(index + 1);
+      assert(signatory, 'Signatory not found');
+
+      const otherSignatories = multisigOperationService.getOtherSignatories(account, signatory.accountId);
       const encodedTransaction = transactionService.encodeTransaction(transaction, api);
       const extrinsic = transactionService.createSubmittableExtrinsic(transaction, api);
 
@@ -113,9 +191,12 @@ transactionSDK(multisigWalletFeature, {
       };
     }
   },
-  wrapLegacy(transaction, { api, account }) {
+  wrapLegacy(transaction, { api, account, route, index }) {
     if (accountUtils.isMultisigAccount(account)) {
-      const otherSignatories = multisigUtils.getOtherSignatories(account, account.accountId);
+      const signatory = route.at(index + 1);
+      assert(signatory, 'Signatory not found');
+
+      const otherSignatories = multisigOperationService.getOtherSignatories(account, signatory.accountId);
       const extrinsic = getExtrinsic[transaction.type](transaction.args, api);
 
       return transactionService.getExtrinsicWeight(extrinsic).then(maxWeight => {
@@ -127,7 +208,8 @@ transactionSDK(multisigWalletFeature, {
             threshold: account.threshold,
             otherSignatories,
             maybeTimepoint: null,
-            call: extrinsic.method.toHex(),
+            callData: extrinsic.method.toHex(),
+            callHash: extrinsic.method.hash.toHex(),
             maxWeight,
           },
         };

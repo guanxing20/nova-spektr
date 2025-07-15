@@ -29,6 +29,29 @@ accountSDK(extensionWalletFeature, {
     return polkadotExtensionService.isExtensionAccount(account);
   },
   canSignMultipleTransactions: () => false,
+  visualGraphNode: ({ account }) => {
+    if (polkadotExtensionService.isExtensionAccount(account)) {
+      if (polkadotExtensionService.isPolkadotExtensionAccount(account)) {
+        return {
+          title: 'Polkadot.js',
+          color: '#FF8C00',
+        };
+      }
+      if (polkadotExtensionService.isTalismanExtensionAccount(account)) {
+        return {
+          title: 'Talisman',
+          color: '#D5FF5C',
+        };
+      }
+      if (polkadotExtensionService.isSubWalletExtensionAccount(account)) {
+        return {
+          title: 'SubWallet',
+          color: '#004BFF',
+          background: 'linear-gradient(180deg, #004BFF 0%, #4CEAAC 100%)',
+        };
+      }
+    }
+  },
 });
 
 extensionWalletFeature.inject(walletIconSlot, ({ wallet, size }) => {

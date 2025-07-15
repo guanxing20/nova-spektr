@@ -1,17 +1,23 @@
 import { useForm } from 'effector-forms';
 import { useUnit } from 'effector-react';
-import { type FormEvent } from 'react';
+import { type FormEvent, useMemo } from 'react';
 
 import { type MultisigAccount } from '@/shared/core';
 import { useI18n } from '@/shared/i18n';
-import { toAddress, toShortAddress } from '@/shared/lib/utils';
+import { toAddress, toShortAddress, withdrawableAmount } from '@/shared/lib/utils';
 import { Alert, Button, InputHint, Select } from '@/shared/ui';
-import { AssetBalance } from '@/shared/ui-entities';
+import { AssetBalance, SignatorySelect } from '@/shared/ui-entities';
+import { accounts } from '@/domains/network';
+import { balanceModel, balanceUtils } from '@/entities/balance';
 import { ChainTitle } from '@/entities/chain';
-import { SignatorySelector } from '@/entities/operations';
 import { PureProxyPopover } from '@/entities/proxy';
-import { FeeWithLabel, MultisigDepositWithLabel, ProxyDeposit, ProxyDepositLabel } from '@/entities/transaction';
-import { AccountAddress, accountUtils } from '@/entities/wallet';
+import {
+  FeeWithLabelWithDataLoading,
+  MultisigDepositWithLabel,
+  ProxyDeposit,
+  ProxyDepositLabel,
+} from '@/entities/transaction';
+import { AccountAddress, accountUtils, walletModel } from '@/entities/wallet';
 import { formModel } from '../model/form-model';
 
 type Props = {
@@ -136,24 +142,41 @@ const Signatories = () => {
   const { t } = useI18n();
 
   const {
-    fields: { chain, signatory },
+    fields: { chain, signatory, account },
   } = useForm(formModel.$proxyForm);
 
   const signatories = useUnit(formModel.$signatories);
+  const allAccounts = useUnit(accounts.$list);
+  const allWallets = useUnit(walletModel.$wallets);
+  const balances = useUnit(balanceModel.$balances);
   const isMultisig = useUnit(formModel.$isMultisig);
+
+  const signatoriesWithBalance = useMemo(() => {
+    return signatories.map((signatory) => {
+      const balance = balanceUtils.getBalance(
+        balances,
+        signatory.accountId,
+        chain.value.chainId,
+        chain.value.assets[0].assetId.toString(),
+      );
+      return { account: signatory, balance: withdrawableAmount(balance) };
+    });
+  }, [signatories, balances]);
 
   if (!isMultisig) {
     return null;
   }
 
   return (
-    <SignatorySelector
+    <SignatorySelect
       signatory={signatory.value}
-      signatories={signatories}
-      asset={chain.value.assets?.[0]}
-      addressPrefix={chain.value.addressPrefix}
+      signatories={signatoriesWithBalance}
       hasError={signatory.hasError()}
       errorText={t(signatory.errorText())}
+      network={{ chain: chain.value, asset: chain.value.assets[0] }}
+      allAccounts={allAccounts}
+      initiator={account.value}
+      allWallets={allWallets}
       onChange={signatory.onChange}
     />
   );
@@ -190,7 +213,7 @@ const FeeSection = () => {
         />
       )}
 
-      <FeeWithLabel
+      <FeeWithLabelWithDataLoading
         api={api}
         asset={chain.value.assets[0]}
         transaction={fakeTx}
